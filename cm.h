@@ -74,6 +74,8 @@ private:
 	std::atomic<int> _new_count;   //<k,v> pair count of _new
 	std::atomic<int> _copy_count;  //<k,v> pair count have copied from _old to _new,if copy done, copy_count equals count
 	
+	static std::atomic<int> t_old_cnt;
+	
 	char* TOMBSTONE =(char*)-1;   //mark the k where <k,v> pair is removed
 	char* COPY_DONE = (char*)-2;  //mark the value where <k,v> has been copied to _new
 
