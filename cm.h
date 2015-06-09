@@ -49,9 +49,6 @@ struct _entry{
 	}  
 };
 
-#define ATOMIC_ST(addr, new) ((addr).store((new)))
-#define ATOMIC_LD(addr)      ((addr).load()      )
-
 class NBHashMap
 {	
 public:
@@ -73,12 +70,13 @@ private:
 	std::atomic<int> _new_maxsize;  //capacity of _new
 	std::atomic<int> _new_count;   //<k,v> pair count of _new
 	std::atomic<int> _copy_count;  //<k,v> pair count have copied from _old to _new,if copy done, copy_count equals count
-	
-	static std::atomic<int> t_old_cnt;
-	
+		
 	char* TOMBSTONE =(char*)-1;   //mark the k where <k,v> pair is removed
-	char* COPY_DONE = (char*)-2;  //mark the value where <k,v> has been copied to _new
-
+    char* COPY_DONE = (char*)-2;  //mark the value where <k,v> has been copied to _new
+    static const int inc = 2;
+    static const int step = 1;
+    std::atomic<int> t_old_cnt;
+    
 	//help functions
 	void init(int capacity,float fac);
 	void do_copy(int old_loca,char *k,char *v); //copy the old_loca member to _new;
@@ -89,7 +87,7 @@ private:
 	bool help_put_to_old(char *k,char *v ); //put (k,v) in to _old
 	char* help_get_from_old(char *k,int &loca); //get (k,v) from to _new, loca is the location for k in _old
 	char* help_get_from_new(char *k);  //get value from _new where key==value
-	bool  help_remove_from_old(char *k,int loca);  //remove <k,v> in _old, and loca is the location of the k in _old
+	bool  help_remove_from_old(char *k,int &loca);  //remove <k,v> in _old, and loca is the location of the k in _old
 	bool  help_remove_from_new(char *k);  //remove <k,v> in _new
 	int bkdrHash(char *key);  // return the hash number of k in _map	
 	unsigned int adjustSize(unsigned int size);

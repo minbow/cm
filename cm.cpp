@@ -78,7 +78,7 @@ bool NBHashMap::put(char *k , char *v)
 			//_entry *newtmp;
 			//newtmp = calloc(new_maxsize, sizeof(_entry));
 						
-		//cout << "check is it other thread has done resize" << endl;	
+		    //cout << "check is it other thread has done resize" << endl;	
 			// check if there are other threads trying to resize 
 			
 			if (_new == oldtmp && _new.compare_exchange_weak(oldtmp, newtmp))			
@@ -104,6 +104,7 @@ bool NBHashMap::put(char *k , char *v)
 		else // no need to do resize
 		{
 		cout << "no need to resize, put (" << k << "," << v << ")  to _old"<< endl; 
+		cout << "_old size count is "<<_count <<endl;
 			help_put_to_old(k,v); 
 		}	
 	}
@@ -117,7 +118,7 @@ bool NBHashMap::put(char *k , char *v)
 char* NBHashMap::get(char *k)
 {		
     assert(k != nullptr);
-	
+	char *v = nullptr;
 	int c = 0,loca = -1;
 	if(_new == _old)  /** not resizing,directly check the _old*/
 	{
@@ -127,24 +128,32 @@ char* NBHashMap::get(char *k)
 	while(_new != _old) /**resizeing: loop find in first check _new,then _oldmap,until resizing finished*/	
 	{
 		c++;
-		char *v = help_get_from_new(k); //v only can be the value of k or nullptr.
+		v = help_get_from_new(k); //v only can be the value of k or nullptr.
 		if(v != nullptr || c > 1)
 			return v;
 		else  
 		{
 		//	int i = 0;
-			v = help_get_from_old(k,loca); //v only can be a value or COPY_DONE or nullptr
-			if(v != COPY_DONE) //exists k in _old,but has been copied to _new,then check _new agin
+			t_old_cnt.fetch_add(1,std::memory_order_relaxed); //add 1 thread opt _old		
+			v = help_get_from_old(k,loca); //v only can be a value or COPY_DONE or nullptr		
+			if(v == COPY_DONE) //exists k in _old,but has been copied to _new,then check _new agin
+			{
+				t_old_cnt.fetch_sub(1,std::memory_order_relaxed); //add 1 thread opt _old		
 				continue;
+			}
 			else if(v == nullptr)// also not exsists in _old
+			{
+				t_old_cnt.fetch_sub(1,std::memory_order_relaxed); //add 1 thread opt _old		
 				return v;
+			}
 			else  // v is the value of k
 			{
 				help_copy(loca,k,v); // copy the pair to _new and then check _new				
-				continue;
+				t_old_cnt.fetch_sub(1,std::memory_order_relaxed); //add 1 thread opt _old		
+				return v;
 			}
 		}
-	}		
+	}	
 }
 
 bool NBHashMap::remove(char *k)  //////not complete done////////////
@@ -152,17 +161,20 @@ bool NBHashMap::remove(char *k)  //////not complete done////////////
     assert(k != nullptr);
 	int loca =-1, c = 0;
 	if(_new == _old) // _new == _old:not resizing,check _old  		
-		return help_remove_from_old(k,loca);
-   		
+	{			
+		help_remove_from_old(k,loca);
+		cout << "remove "<< k << " from _old[" <<loca << "]"<<endl;
+   	}	
 	while(_new != _old)  //resizing: check _old:  
 	{    //if not find k:remove from _new
          //       find k: help copy to _new, and the remove from _new
 		if(help_remove_from_new(k)) // _new has k,remove it,then change the k in _old to COPY_DONE
 		{
-			set_copydone(k);
+			set_copydone(k); //check whether _old has k,if has, set COPY_DONE for k 
 			return true;
-		}
-		else //_new don't has k,check _old
+		}		
+		else //_new don't has k,
+		//check _old,if _old has k,and v is not COPY_DONE,then set COPY_DONE, if v is COPY_DONE, then remove from _new
 		{
 		    t_old_cnt.fetch_add(1,std::memory_order_relaxed); //add 1 thread opt _old
 			for(int i = bkdrHash(k); ; i++)
@@ -172,22 +184,27 @@ bool NBHashMap::remove(char *k)  //////not complete done////////////
     			if(probk != nullptr && string(probk) == string(k))
     			{
     				char *probv = _old[i].value.load(std::memory_order_relaxed);
-    				if(probv != COPY_DONE)	
+    				if(probv != COPY_DONE)	// (k,v) not be copied to _new ,then set COPY_DONE directly
     				{	
-    					help_copy(i,k,probv);   		  	 	
+    					//help_copy(i,k,probv);   	
+    					if(_old[i].value.compare_exchange_weak(probv,COPY_DONE))    			
+    						_copy_count.fetch_add(1,std::memory_order_relaxed);   	    						
     				}
+    				else
+    					help_remove_from_new(k); // reback to remove k from _new
+    				
     				t_old_cnt.fetch_sub(1,std::memory_order_relaxed); //sub 1 thread opt _old
-    				return help_remove_from_new(k);
+    				return true;	  	 
 				}
-				else if(probk == nullptr)
+				else if(probk == nullptr) // _old not contian k
 				{
 					t_old_cnt.fetch_sub(1,std::memory_order_relaxed); //sub 1 thread opt _old
 					return false;
 				}
-				else
+				else //continue to check next one, until find k or nullptr
 					continue;
 			}			
-   	   }      
+   	    } 
 	}
 }
 
@@ -233,6 +250,7 @@ void NBHashMap::do_copy(int old_loca,char *k,char *v) //copy (k,v) from _old to 
     int tomb_index = -1; //tomb index in _new;
 	for(int i = bkdrHash(k);;i++)
 	{
+		i %= _new_maxsize;
 		//char *probk = _old[old_loca].key.load(std::memory_order_relaxed);
 		char *oldv = _old[old_loca].value.load(std::memory_order_relaxed);
 		//assert(!(probk == nullptr) && !(probk == TOMBSTONE));
@@ -249,20 +267,23 @@ void NBHashMap::do_copy(int old_loca,char *k,char *v) //copy (k,v) from _old to 
 				{
 					_copy_count.fetch_add(1,std::memory_order_relaxed);
 					if(_copy_count == _count)
-					{
-					
-						if(t_old_cnt.compare_exchange_weak(2,1))//if no other thread opt _old,then change _old point to _new
+					{					
+					    int ic = inc;
+						if(t_old_cnt.compare_exchange_weak(ic,step))//if no other thread opt _old,then change _old point to _new
 						{
 							_entry *newtmp = _new;				
 							if(_old.compare_exchange_weak(oldtmp, newtmp)) //_old = _new;
-							{
+							{    cout << "point _old to _new"<< endl;
+								if(_old == _new)
+									cout<< "_old == _new: "<< &_old[0] << " " << &_new[0] << endl;
 								_maxsize.store(_new_maxsize,std::memory_order_relaxed);
 								_count.store(_new_count,std::memory_order_relaxed);
 								_copy_count.store(0,std::memory_order_relaxed);		
 													
-								delete[] oldtmp;					
+								//delete[] oldtmp;					
 								oldtmp = nullptr;
 								newtmp = nullptr;	
+								cout << "resize done !" << endl;
 								return;
 							}										
 						}	                             
@@ -271,7 +292,7 @@ void NBHashMap::do_copy(int old_loca,char *k,char *v) //copy (k,v) from _old to 
 				break;  // false: (k,v) was copied by other thread.
 			}
 			else  //probk != k
-			{		
+			{	
 				if(probk != nullptr)
 				{
 					if(probk != TOMBSTONE)
@@ -285,8 +306,7 @@ void NBHashMap::do_copy(int old_loca,char *k,char *v) //copy (k,v) from _old to 
 				else		
 				{
 					if(tomb_index != -1) //put to the tomb_index location
-					{	
-					
+					{						
 						if(_new[tomb_index].key.compare_exchange_weak(probk,k))
 						{
 							cout << "_new index: " << i << endl;
@@ -307,17 +327,19 @@ void NBHashMap::do_copy(int old_loca,char *k,char *v) //copy (k,v) from _old to 
 								if(_copy_count == _count) //test whether finish copy
 								{				
 					          	 //if no other thread opt _old,then change _old point to _new
-									if(t_old_cnt.compare_exchange_weak(2,1))								
+					          	    int ic = inc;
+									if(t_old_cnt.compare_exchange_weak(ic,step))								
 									{
 										_entry *newtmp = _new;
 										if(_old.compare_exchange_weak(oldtmp, newtmp)) //_old = _new;
-										{
+										{   cout << "point _old to _new"<<endl;
 											_maxsize.store(_new_maxsize,std::memory_order_relaxed);
 											_count.store(_new_count,std::memory_order_relaxed);
 									
-											delete[] oldtmp;					
+											//delete[] oldtmp;					
 							        		oldtmp = nullptr;
 							        		newtmp = nullptr;
+							        		cout << "resize done !" << endl;
 							        		return;
 										}
 									}
@@ -350,17 +372,19 @@ void NBHashMap::do_copy(int old_loca,char *k,char *v) //copy (k,v) from _old to 
 								
 								if(_copy_count == _count) //test finish copy
 								{			
-									if(t_old_cnt.compare_exchange_weak(2,1))								
+								    int ic = inc;
+									if(t_old_cnt.compare_exchange_weak(ic,step))								
 									{
 										_entry *newtmp = _new;
 										if(_old.compare_exchange_weak(oldtmp, newtmp)) //_old = _new;
-										{
+										{   cout << "point _old to _new"<<endl;
 											_maxsize.store(_new_maxsize,std::memory_order_relaxed);
 											_count.store(_new_count,std::memory_order_relaxed);
 									
-											delete[] oldtmp;					
+											//delete[] oldtmp;					
 							        		oldtmp = nullptr;
 							        		newtmp = nullptr;
+							        		cout << "resize done !" << endl;
 							        		return;
 							       		}
 									}
@@ -401,7 +425,8 @@ void NBHashMap::copy() // copy all the pairs from _old to _new
         	}    	
         }      
 	}
-    				
+    t_old_cnt.fetch_sub(1,std::memory_order_relaxed); //sub 1 thread opt _old		
+	return; 				
 } 
 
 void NBHashMap::help_copy(int old_loca,char *k,char *v)
@@ -413,30 +438,30 @@ void NBHashMap::help_copy(int old_loca,char *k,char *v)
 bool NBHashMap::set_copydone(char *k)
 {
     assert(k != nullptr);
-    assert(_old != nullptr);
+    assert(_old != nullptr && _old != _new);
 
+    t_old_cnt.fetch_add(1,std::memory_order_relaxed); //add 1 thread opt _old		
 	for(int i = bkdrHash(k); ; i++)
 	{
     	i %= _maxsize;
        	char *probk = _old[i].key.load(std::memory_order_relaxed);
-       	if(probk == nullptr)
-       		return false;
+       	if(probk == nullptr) //_old do not contians k
+		   	break;
     	else if(string(probk) == string(k))
     	{
     		char *probv = _old[i].value.load(std::memory_order_relaxed);
     		if(probv != COPY_DONE)	
     		{
-    			if(_old[i].value.compare_exchange_weak(probv,COPY_DONE))
-    			{
-    				_copy_count.fetch_add(1,std::memory_order_relaxed);
-    				return true;
-    			}
+    			if(_old[i].value.compare_exchange_weak(probv,COPY_DONE))    			
+    				_copy_count.fetch_add(1,std::memory_order_relaxed);   			
     		}
-    		return false;		
+    		break;
     	}
-    	else
+    	else //continue to check next one until probk is nullptr
     		continue;
 	}
+	t_old_cnt.fetch_sub(1,std::memory_order_relaxed); //sub 1 thread opt _old		
+	return true;
 }
 
 bool NBHashMap::help_put_to_new(char *k, char *v) //put (k,v) in to _new
@@ -452,7 +477,9 @@ bool NBHashMap::help_put_to_new(char *k, char *v) //put (k,v) in to _new
 		char *probv = _new[i].value.load(std::memory_order_relaxed);
 		if(probk != nullptr && string(probk) == string(k))					
 		{
+		    cout << k << " exists !"<< endl;
 			_new[i].value.compare_exchange_weak(probv,v);
+			cout << "change "<<  v << " to " << v << endl;
 		//_new_count.fetch_add(1,memory_order_relaxed);			
 			return true;		
 		}	
@@ -470,6 +497,7 @@ bool NBHashMap::help_put_to_new(char *k, char *v) //put (k,v) in to _new
 			} 
 			else		
 			{
+		    	cout << k << " not exists"<< endl;
 				if(tomb_index != -1) // the location : tomb_index in _new is available
 				{
 					_new[tomb_index].key.compare_exchange_weak(probk,k);
@@ -519,15 +547,15 @@ bool NBHashMap::help_put_to_old(char *k,char *v ) //put (k,v) in to _old
 		char *probv =  _old[i].value.load(std::memory_order_relaxed);
 		if(probk != nullptr && string(probk) == string(k))					
 		{
-		cout << k << " exists "<< endl;
+		    cout << k << " exists !"<< endl;
 			if(_old[i].value.compare_exchange_weak(probv,v))
-				cout << k << " exists, change v to " << v << endl;
+				cout << "change "<<  probv << " to " << v << endl;
 		//_new_count.fetch_add(1,memory_order_relaxed);			
 			return true;		
 		}	
 		else
 		{
-			cout << k << " not exists"<< endl;
+			
 			if(probk != nullptr)
 			{
 				if(probk != TOMBSTONE)
@@ -541,6 +569,7 @@ bool NBHashMap::help_put_to_old(char *k,char *v ) //put (k,v) in to _old
 			} 
 			else		
 			{
+				cout << k << " not exists"<< endl;
 				if(tomb_index != -1) // the location : tomb_index in _old is available
 				{
 					_old[tomb_index].key.compare_exchange_weak(probk,k);
@@ -574,8 +603,7 @@ bool NBHashMap::help_put_to_old(char *k,char *v ) //put (k,v) in to _old
 					}			
 				}
 			}									
-		}
-		
+		}		
 	}	
 }
 
@@ -585,16 +613,21 @@ char* NBHashMap::help_get_from_old(char *k,int &loca) //loca is the location of 
     assert(_old != nullptr);
 	
 	int i = bkdrHash(k);
-	int hash = i;
+
 	for(; ; i++)
 	{
 		i %= _maxsize;
 		loca = i;
-		char *probk =_old[i].key.load(std::memory_order_relaxed);			
-		if(probk != nullptr && string(probk)== string(k))		
-			return _old[i].value.load(std::memory_order_relaxed);
+		char *probk =_old[i].key.load(std::memory_order_relaxed);		
 		if(probk == nullptr) 
 			return nullptr;	
+		else
+		{
+		    if(string(probk) == string(k))		
+				return _old[i].value.load(std::memory_order_relaxed);
+		    else
+		    	continue;
+		}	    
 	}	
 }
 
@@ -614,7 +647,7 @@ char* NBHashMap::help_get_from_new(char *k) //loca is the location of the (k,v)
 	}	
 }
 
-bool  NBHashMap::help_remove_from_old(char *k,int loca) //loca is the location of k in _old
+bool  NBHashMap::help_remove_from_old(char *k,int &loca) //loca is the location of k in _old
 {	
     assert(k != nullptr);
     assert(_old != nullptr);
@@ -628,7 +661,7 @@ bool  NBHashMap::help_remove_from_old(char *k,int loca) //loca is the location o
 			return false;
 		if(delkey != nullptr && string(delkey) == string(k))		
 		{
-			if(_old[i].key.compare_exchange_weak(k,TOMBSTONE));
+			if(_old[i].key.compare_exchange_weak(delkey,TOMBSTONE));
 			{
 				_count.fetch_sub(1,memory_order_relaxed);
 			}
