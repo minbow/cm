@@ -36,8 +36,8 @@ const unsigned long size_Array[30] = {
 
 struct _entry{
 	//data members: atomic type key and value
-	std::atomic<char*> key; 
-	std::atomic<char*> value;
+	atomic<char*> key; 
+	atomic<char*> value;
 	
 	//constructor
 	_entry():key(nullptr),value(nullptr){}
@@ -65,36 +65,37 @@ private:
 	atomic<_entry *> _old;
 	atomic<_entry *> _new;
     float _factor;  //resize factor
-    std::atomic<int> _maxsize;  //capacity of _old
-	std::atomic<int> _count;    //<k,v> pair count of _old
-	std::atomic<int> _new_maxsize;  //capacity of _new
-	std::atomic<int> _new_count;   //<k,v> pair count of _new
-	std::atomic<int> _copy_count;  //<k,v> pair count have copied from _old to _new,if copy done, copy_count equals count
+    atomic<int> _maxsize;  //capacity of _old
+	atomic<int> _count;    //<k,v> pair count of _old
+	atomic<int> _new_maxsize;  //capacity of _new
+	atomic<int> _new_count;   //<k,v> pair count of _new
+	atomic<int> _copy_count;  //<k,v> pair count have copied from _old to _new,if copy done, copy_count equals count
 		
 //	static const char* TOMBSTONE = (char*)-1; //mark the k where <k,v> pair is removed
  //   static const char* COPY_DONE = (char*)-2;//mark the value where <k,v> has been copied to _new
     char* TOMBSTONE = (char *)-1 ;//mark the k where <k,v> pair is removed
     char* COPY_DONE = (char *)-2; //mark the value where <k,v> has been copied to _new
     
-    static const int inc = 2;
-    static const int step = 1;
-    std::atomic<int> t_old_cnt;
+    static const int _two = 2;
+    static const int _one = 1;
+     static const int _zero = 1;
+    atomic<int> _t_old_cnt; //count the thread opt _old when resizing
     
 	//help functions
 	void init(int capacity,float fac);
-	void do_copy(int old_loca,char *k,char *v); //copy the old_loca member to _new;
 	void copy();//copy all pairs from _old to _new;
+	void do_copy(int old_loca,char *k,char *v); //copy the old_loca member to _new;	
 	void help_copy(int old_loca,char *k,char *v); //other thread help copy the old_loca member to _new;
 	bool set_copydone(char *k);
 	bool help_put_to_new(char *k, char *v); //put (k,v) in to _new
 	bool help_put_to_old(char *k,char *v ); //put (k,v) in to _old
-	char* help_get_from_old(char *k,int &loca); //get (k,v) from to _new, loca is the location for k in _old
+	char* help_get_from_old(char *k,int &loca); //get (k,v) from  _new, loca is the location for k in _old
 	char* help_get_from_new(char *k);  //get value from _new where key==value
 	bool  help_remove_from_old(char *k,int &loca);  //remove <k,v> in _old, and loca is the location of the k in _old
 	bool  help_remove_from_new(char *k);  //remove <k,v> in _new
 	int bkdrHash(char *key);  // return the hash number of k in _map	
 	unsigned int adjustSize(unsigned int size);
-	int find(_entry *_map,int size,char *k); //return a vailable location in _map
+//	int find(_entry *_map,int size,char *k); //return a vailable location in _map
 };
 
 #endif // _NB_HASH_MAP_H_

@@ -42,7 +42,7 @@ NBHashMap::NBHashMap(int capacity,float fac)
 	_new = nullptr;
 	//TOMBSTONE = (char *)-1;
 //	COPY_DONE = (char *)-2;
-    t_old_cnt.store(0,std::memory_order_relaxed); //no thread opt _old
+    _t_old_cnt.store(0,std::memory_order_relaxed); //no thread opt _old
 	init(capacity,fac);
 }
 
@@ -138,27 +138,31 @@ char* NBHashMap::get(char *k)
 		c++;
 		v = help_get_from_new(k); //v only can be the value of k or nullptr.
 		if(v != nullptr || c > 1)
+		{
+			if(v != nullptr)
+				set_copydone(k);
 			return v;
+		}
 		else  
 		{
 		//	int i = 0;
-			t_old_cnt.operator++(); //add 1 thread opt _old		
+			_t_old_cnt.operator++(); //add 1 thread opt _old		
 			v = help_get_from_old(k,loca); //v only can be a value or COPY_DONE or nullptr		
 			if(v == COPY_DONE) //exists k in _old,but has been copied to _new,then check _new agin
 			{
-				t_old_cnt.operator--(); //sub 1 thread opt _old		
+				_t_old_cnt.operator--(); //sub 1 thread opt _old		
 				continue;
 			}
 			else if(v == nullptr)// also not exsists in _old
 			{
-				t_old_cnt.operator--(); //add 1 thread opt _old		
+				_t_old_cnt.operator--(); //add 1 thread opt _old		
 				return v;
 
 			}
 			else  // v is the value of k
 			{
 				help_copy(loca,k,v); // copy the pair to _new and then check _new				
-				t_old_cnt.operator--();    //sub 1 thread opt _old		
+				_t_old_cnt.operator--();    //sub 1 thread opt _old		
 				return v;
 			}
 		}
@@ -184,7 +188,7 @@ bool NBHashMap::remove(char *k)  //////not complete done////////////
 		else //_new don't has k,
 		//check _old,if _old has k,and v is not COPY_DONE,then set COPY_DONE, if v is COPY_DONE, then remove from _new
 		{
-		    t_old_cnt.operator++();   //add 1 thread opt _old
+		    _t_old_cnt.operator++();   //add 1 thread opt _old
 			for(int i = bkdrHash(k); ; i++)
 			{
        			i %= _maxsize;
@@ -192,7 +196,7 @@ bool NBHashMap::remove(char *k)  //////not complete done////////////
        			
        			if(probk == nullptr) // _old not contian k
 				{
-					t_old_cnt.operator--(); //sub 1 thread opt _old
+					_t_old_cnt.operator--(); //sub 1 thread opt _old
 					return false;
 				}      			    			  		
     			else if(probk != TOMBSTONE && string(probk) == string(k))
@@ -207,7 +211,7 @@ bool NBHashMap::remove(char *k)  //////not complete done////////////
     				else
     					help_remove_from_new(k); // reback to remove k from _new
     				
-    				t_old_cnt.operator--(); //sub 1 thread opt _old
+    				_t_old_cnt.operator--(); //sub 1 thread opt _old
     				return true;	  	 
 				}				
 				else //continue to check next one, until find k or nullptr
@@ -252,7 +256,7 @@ void NBHashMap::do_copy(int old_loca,char *k,char *v) //copy (k,v) from _old to 
     assert(_old != nullptr);
 	assert(_new != nullptr);
 	//cout << "_copy_count = " << _copy_count << endl;
-	t_old_cnt.operator++();//add 1 thread opt _old
+	_t_old_cnt.operator++();//add 1 thread opt _old
 	_entry *oldtmp = _old;
     int tomb_index = -1; //tomb index in _new;
     cout << "copy the " << old_loca << " one: (" << _old[old_loca].key << ","<< _old[old_loca].value <<")" <<endl;
@@ -280,8 +284,8 @@ void NBHashMap::do_copy(int old_loca,char *k,char *v) //copy (k,v) from _old to 
 					cout<<_copy_count << endl;
 					if(_copy_count == _count)
 					{					
-					    int ic = inc;
-						if(t_old_cnt.compare_exchange_weak(ic,step))//if no other thread opt _old,then change _old point to _new
+					    int ic = _two;
+						if(_t_old_cnt.compare_exchange_weak(ic,_one))//if no other thread opt _old,then change _old point to _new
 						{
 							_entry *newtmp = _new;				
 							if(_old.compare_exchange_weak(oldtmp, newtmp)) //_old = _new;
@@ -338,8 +342,8 @@ void NBHashMap::do_copy(int old_loca,char *k,char *v) //copy (k,v) from _old to 
 								if(_copy_count == _count) //test whether finish copy
 								{				
 					          	 //if no other thread opt _old,then change _old point to _new
-					          	    int ic = inc;
-									if(t_old_cnt.compare_exchange_weak(ic,step))								
+					          	    int ic = _two;
+									if(_t_old_cnt.compare_exchange_weak(ic,_one))								
 									{
 										_entry *newtmp = _new;
 										if(_old.compare_exchange_weak(oldtmp, newtmp)) //_old = _new;
@@ -380,8 +384,8 @@ void NBHashMap::do_copy(int old_loca,char *k,char *v) //copy (k,v) from _old to 
 								_copy_count.operator++();								
 								if(_copy_count == _count) //test  copy finished
 								{			
-								    int ic = inc;
-									if(t_old_cnt.compare_exchange_weak(ic,step))								
+								    int ic = _two;
+									if(_t_old_cnt.compare_exchange_weak(ic,_one))								
 									{
 										_entry *newtmp = _new;
 										if(_old.compare_exchange_weak(oldtmp, newtmp)) //_old = _new;
@@ -412,14 +416,14 @@ void NBHashMap::do_copy(int old_loca,char *k,char *v) //copy (k,v) from _old to 
 		}
 	    break;
 	}
-	t_old_cnt.operator--(); //sub 1 thread opt _old		
+	_t_old_cnt.operator--(); //sub 1 thread opt _old		
 	return;
 }
 
 void NBHashMap::copy() // copy all the pairs from _old to _new
 {
 
-	t_old_cnt.operator++(); //add 1 thread opt _old		
+	_t_old_cnt.operator++(); //add 1 thread opt _old		
 	for(int i = 0; i < _maxsize; i++)
 	{        		
         char *probk = _old[i].key.load(std::memory_order_relaxed);     
@@ -429,21 +433,46 @@ void NBHashMap::copy() // copy all the pairs from _old to _new
         	if(probv != COPY_DONE && probv != nullptr)     
         	{      	
         	    cout << "_count _copy_count = " << _count << " " << _copy_count << endl;
-        		do_copy(i,probk,probv);   
-        		
-        		if(_old == _new ) //resize finished; here must check if it has finished resize,otherwise,it will copy the new one.but how to solve it in mutiple threads????
-        		{
-        			while(_count != _new_count) //opt on _new then let _old = _new,then _new_count will change
-        			{
-        				_count.store(_new_count,std::memory_order_relaxed);
-        			}
-        		
-        			break;
-        		}
+        		do_copy(i,probk,probv);           		
         	}    	
-        }      
+        }  
+        
+        if(_old == _new ) //resize finished; here must check if it has finished resize,otherwise,it will copy the new one.but how to solve it in mutiple threads????
+        {
+        	while(_count != _new_count) //opt on _new then let _old = _new,then _new_count will change
+        	{
+        		_count.store(_new_count,std::memory_order_relaxed);
+        	}
+        		
+        	break;
+        }                    
 	}
-    t_old_cnt.operator--(); //sub 1 thread opt _old		
+	_entry *oldtmp = _old;
+	if(_old != _new && _copy_count == _count) //test  copy finished
+	{		
+			int ic = _one;
+		
+			if(_t_old_cnt.compare_exchange_weak(ic,_zero))								
+		    {
+				_entry *newtmp = _new;
+				if(_old.compare_exchange_weak(oldtmp, newtmp)) //_old = _new;
+				{ 
+					cout << "point _old to _new"<<endl;
+				   if(_old == _new)
+						cout<< "_old == _new: "<< &_old[0] << " " << &_new[0] << endl;
+						_maxsize.store(_new_maxsize,std::memory_order_relaxed);
+						_count.store(_new_count,std::memory_order_relaxed);
+									
+						delete []oldtmp;					
+						oldtmp = nullptr;
+						newtmp = nullptr;
+						cout << "resize done !" << endl;
+						return;
+				}
+			}
+	}
+	
+    _t_old_cnt.operator--(); //sub 1 thread opt _old		
 	return; 				
 } 
 
@@ -459,7 +488,7 @@ bool NBHashMap::set_copydone(char *k)
     assert(k != nullptr);
     assert(_old != nullptr && _old != _new);
 
-    t_old_cnt.operator++(); //add 1 thread opt _old		
+    _t_old_cnt.operator++(); //add 1 thread opt _old		
 	for(int i = bkdrHash(k); ; i++)
 	{
     	i %= _maxsize;
@@ -479,7 +508,7 @@ bool NBHashMap::set_copydone(char *k)
     	else //continue to check next one until probk is nullptr
     		continue;
 	}
-	t_old_cnt.operator--(); //sub 1 thread opt _old		
+	_t_old_cnt.operator--(); //sub 1 thread opt _old		
 	return true;
 }
 
